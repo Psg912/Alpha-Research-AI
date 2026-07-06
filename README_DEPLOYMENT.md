@@ -102,6 +102,26 @@ Wi-Fi: `streamlit run app.py --server.address 0.0.0.0` then browse to
 
 ---
 
+## Features added in v2
+
+- **👥 Peer comparison tab** — pulls up to 4 similar instruments from Yahoo's
+  free similarity engine and compares P/E, ROE, margins, growth and yield
+  (or expense ratio, AUM and returns for ETFs) side by side, with a peer-median
+  row and a better/worse verdict per metric.
+- **Sector-adjusted benchmark bands** — a toggle at the top of each stock
+  report. On (default), thresholds shift to the sector's own norms: banks are
+  judged on P/B and allowed structural leverage, tech is allowed a higher P/E
+  but expected to deliver fatter margins, utilities are judged as income
+  assets. Each adjusted card says so explicitly. Off = one market-wide yardstick.
+- **⭐ Watchlist & score history** — every generated or refreshed report is
+  auto-logged (with a 10-minute dedupe). The history tab shows the latest score
+  per instrument with a Δ against your previous report, a score-over-time
+  chart, and CSV backup/restore. **Note:** on free hosting the history file
+  resets when the app redeploys or restarts — download the backup CSV
+  periodically and re-upload it to restore.
+
+---
+
 ## Optional free upgrades (later)
 
 - **Alpha Vantage** (free key, 25 requests/day) as a second quote source.
