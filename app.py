@@ -20,6 +20,7 @@ Deploy free:   Streamlit Community Cloud (see README_DEPLOYMENT.md)
 import json
 import math
 import os
+import re
 from datetime import datetime, timezone
 
 import numpy as np
@@ -948,12 +949,14 @@ def bull_bear(metrics):
     scored = [x for x in metrics if x["score"] is not None]
     bulls = sorted(scored, key=lambda x: -x["score"])[:4]
     bears = sorted(scored, key=lambda x: x["score"])[:4]
-    bull_pts = [f"**{b['name']}** at {b['value']} ({b['status']}): {b['why']}" for b in bulls if b["score"] >= 65]
-    bear_pts = [f"**{b['name']}** at {b['value']} ({b['status']}): {b['interpretation']}" for b in bears if b["score"] <= 60]
+    bull_pts = [f"**{b['name']}** at {b['value']}: {plain_words(b) or b['why']}" for b in bulls if b["score"] >= 65]
+    bear_pts = [f"**{b['name']}** at {b['value']}: {plain_words(b) or b['interpretation']}" for b in bears if b["score"] <= 60]
     if not bull_pts:
-        bull_pts = ["No metric currently reaches the 'Good' band — the positive case rests on factors outside this quantitative screen."]
+        bull_pts = ["Nothing stands out as strong in the numbers alone — any case for buying rests on things "
+                    "the numbers can't see, like new products, management quality or industry change."]
     if not bear_pts:
-        bear_pts = ["No scored metric currently sits in the weak bands — the main risks are qualitative (execution, regulation, competition)."]
+        bear_pts = ["No number looks worryingly weak right now — the remaining risks are the kind numbers "
+                    "can't show, like competition, regulation or management missteps."]
     return bull_pts, bear_pts
 
 
@@ -1159,6 +1162,278 @@ with st.container(border=True):
 # UI — report
 # ---------------------------------------------------------------------------
 
+# --- Investment-horizon views ---------------------------------------------
+# Same category scores, re-weighted for the holding period. Long-term (5y+)
+# emphasises quality and survivability; mid-term (~3y) emphasises entry
+# valuation and trend, because there is less time for quality to compound
+# past a poor entry price. Transparent, rule-based — no hidden model.
+
+HORIZON_WEIGHTS = {
+    "stock": {
+        "long": {"Profitability": 0.30, "Financial Health": 0.20, "Growth": 0.20,
+                 "Valuation": 0.15, "Risk": 0.15},
+        "mid": {"Valuation": 0.25, "Growth": 0.20, "Profitability": 0.15,
+                "Technical Trend": 0.15, "Risk": 0.15, "Financial Health": 0.10},
+    },
+    "etf": {
+        "long": {"Cost": 0.30, "Holdings Quality": 0.20, "Risk": 0.20,
+                 "Performance": 0.15, "Liquidity": 0.15},
+        "mid": {"Performance": 0.30, "Risk": 0.25, "Cost": 0.15,
+                "Liquidity": 0.15, "Holdings Quality": 0.15},
+    },
+}
+
+
+def horizon_view(metrics, cat_scores, wmap):
+    """Return (score, emoji, label, confidence%) for one horizon.
+    Confidence = share of the horizon's weighted inputs actually covered by data."""
+    total_w = sum(wmap.values())
+    conf_acc, covered = 0.0, {}
+    for c, w in wmap.items():
+        cat_ms = [x for x in metrics if x["category"] == c]
+        if cat_ms:
+            conf_acc += w * sum(1 for x in cat_ms if x["score"] is not None) / len(cat_ms)
+        if c in cat_scores:
+            covered[c] = w
+    if not covered:
+        return None, "⚪", "Insufficient data", 0
+    score = round(sum(cat_scores[c] * w for c, w in covered.items()) / sum(covered.values()))
+    conf = round(conf_acc / total_w * 100)
+    if score >= 72:
+        emoji, label = "🟢", "Favourable"
+    elif score >= 58:
+        emoji, label = "🟡", "Moderately favourable"
+    elif score >= 45:
+        emoji, label = "🟠", "Neutral / mixed"
+    else:
+        emoji, label = "🔴", "Unfavourable"
+    return score, emoji, label, conf
+
+
+def fmt_weights(d):
+    return ", ".join(f"{c} {w:.0%}" for c, w in d.items())
+
+
+def business_summary(info, max_sentences=2, max_chars=360):
+    """First couple of sentences of the company/fund description."""
+    txt = (info.get("longBusinessSummary") or "").strip()
+    if not txt:
+        fam, cat = info.get("fundFamily"), info.get("category")
+        if fam or cat:
+            return f"{fam or 'Fund'} — {cat or 'exchange-traded fund'}."
+        return None
+    sents = re.split(r"(?<=[.!?])\s+", txt)
+    out = " ".join(sents[:max_sentences])
+    if len(out) > max_chars:
+        out = out[:max_chars].rsplit(" ", 1)[0] + "…"
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Plain-language layer — every metric explained without finance vocabulary
+# ---------------------------------------------------------------------------
+
+def _pw(with_value, without_value):
+    """Build a plain-words function: uses the live number when available,
+    falls back to a generic sentence when the data source didn't publish it."""
+    def f(mt):
+        raw = mt.get("raw")
+        try:
+            return with_value(raw, mt) if raw is not None else without_value
+        except Exception:
+            return without_value
+    return f
+
+
+PLAIN_WORDS = {
+    "P/E Ratio (trailing)": _pw(
+        lambda r, m: f"You're paying about {r:,.0f} years of today's profit for this share — like paying {r:,.0f} years' rent upfront to buy the house.",
+        "This counts how many years of today's profit you'd pay for the share — like working out how many years' rent it would take to buy the house."),
+    "Forward P/E": _pw(
+        lambda r, m: f"Same idea, but using *next year's expected* profit: about {r:,.0f} years' worth at the forecast.",
+        "Same idea as P/E, but using next year's expected profit instead of last year's."),
+    "PEG Ratio": _pw(
+        lambda r, m: f"This checks whether the price is fair *for how fast profits are growing*. Around 1 is fair; {r:,.1f} means you're paying {'a discount' if r < 1 else 'roughly fair value' if r <= 1.3 else 'a premium'} for the growth.",
+        "This checks whether the price is fair for how fast profits are growing — around 1 is considered fair."),
+    "Price-to-Sales": _pw(
+        lambda r, m: f"The whole company is priced at about {r:,.1f} years of its sales — before any costs are taken out.",
+        "This prices the whole company against its yearly sales — useful when profits are lumpy."),
+    "Price-to-Book": _pw(
+        lambda r, m: f"The share costs about {r:,.1f}× what the company's possessions minus its debts are worth on paper.",
+        "This compares the share price with what the company's possessions minus debts are worth on paper."),
+    "EV / EBITDA": _pw(
+        lambda r, m: f"A takeover-style check: buying the whole company, debts included, would cost about {r:,.0f} years of its core cash profits.",
+        "A takeover-style check: how many years of core cash profits it would take to pay for the whole company, debts included."),
+    "Free Cash Flow Yield": _pw(
+        lambda r, m: f"For every 100 you'd pay for the whole company, it generates about {r:,.1f} in spare cash each year — like a house whose rent covers {r:,.1f}% of its price annually.",
+        "How much spare cash the business generates each year compared with its price — like checking whether a house's rent justifies its price."),
+    "Dividend Yield": _pw(
+        lambda r, m: f"The company pays you back about {r:,.1f}% of your money each year in cash — a bit like interest on savings, on top of any change in the share price.",
+        "The cash the company pays you each year for holding the share — a bit like interest on savings. Many growing companies deliberately pay little or none."),
+    "Revenue Growth (yoy)": _pw(
+        lambda r, m: f"The company sold about {abs(r):,.0f}% {'more' if r >= 0 else 'less'} than a year ago — {'the shop is busier than before' if r >= 0 else 'the shop is quieter than before'}.",
+        "Whether the company is selling more than it did a year ago — the raw material of all future profit."),
+    "EPS Growth (yoy)": _pw(
+        lambda r, m: f"Profit per share is {abs(r):,.0f}% {'higher' if r >= 0 else 'lower'} than a year ago.",
+        "Whether the profit behind each share is growing — over long periods, share prices tend to follow this."),
+    "Gross Margin": _pw(
+        lambda r, m: f"For every 100 of sales, about {r:,.0f} is left after paying for the product itself — that's the room it has for everything else.",
+        "How much of each sale is left after paying for the product itself — the company's basic pricing power."),
+    "Operating Margin": _pw(
+        lambda r, m: f"After all the day-to-day running costs, about {r:,.0f} of every 100 in sales remains as profit.",
+        "How much of each sale is left after all the day-to-day running costs."),
+    "Net Margin": _pw(
+        lambda r, m: f"At the very end — after everything, including tax — the company keeps about {r:,.0f} of every 100 it sells.",
+        "How much of each sale the company finally keeps after absolutely everything, including tax."),
+    "Return on Equity": _pw(
+        lambda r, m: f"For every 100 of the owners' money in the business, it earned about {r:,.0f} this year — think of it as the interest rate the business pays its owners.",
+        "How hard the owners' money works — think of it as the interest rate the business earns on the money shareholders have put in."),
+    "Return on Assets": _pw(
+        lambda r, m: f"For every 100 of things the company owns — factories, stock, cash — it earned about {r:,.1f} this year.",
+        "How much profit the company squeezes out of everything it owns — factories, stock, cash."),
+    "Debt-to-Equity": _pw(
+        lambda r, m: f"For every 100 the owners have put in, the company has borrowed about {r:,.0f}. {'A light load.' if r <= 50 else 'A moderate load.' if r <= 120 else 'A heavy load — borrowing magnifies both good and bad years.'}",
+        "How much the company has borrowed compared with the owners' own money — borrowing magnifies both good years and bad ones."),
+    "Current Ratio": _pw(
+        lambda r, m: f"For every 1 of bills due within a year, the company has about {r:,.1f} readily available to pay them.",
+        "Whether the company can comfortably pay the bills landing in the next twelve months."),
+    "Cash Position (% of market cap)": _pw(
+        lambda r, m: f"About {r:,.0f}% of the company's entire price tag is sitting there as ready cash — its rainy-day fund.",
+        "How big the company's rainy-day cash fund is compared with its price tag."),
+    "Beta (5y monthly)": _pw(
+        lambda r, m: f"When the whole market moves 10%, this typically moves about {abs(r) * 10:,.0f}% — {'more jumpy than' if r > 1.1 else 'calmer than' if r < 0.9 else 'about the same as'} the market overall.",
+        "How much this tends to move when the whole market moves — above 1 means jumpier than average, below 1 means calmer."),
+    "Beta (3y)": _pw(
+        lambda r, m: f"When the whole market moves 10%, this typically moves about {abs(r) * 10:,.0f}% — {'more jumpy than' if r > 1.1 else 'calmer than' if r < 0.9 else 'about the same as'} the market overall.",
+        "How much this tends to move when the whole market moves — above 1 means jumpier than average, below 1 means calmer."),
+    "Volatility (1y, annualised)": _pw(
+        lambda r, m: f"In a typical year the price swings roughly {r:,.0f}% up or down — that's how bumpy the ride has actually been.",
+        "How bumpy the ride has been — the size of the typical up-and-down swings over a year."),
+    "Max Drawdown (1y)": _pw(
+        lambda r, m: f"If you'd bought at the worst possible moment in the past year, you'd have been down about {abs(r):,.0f}% at the lowest point.",
+        "The deepest fall from a peak in the past year — the loss an unlucky buyer actually felt."),
+    "Price vs 50-day MA": _pw(
+        lambda r, m: f"The price is {abs(r):,.1f}% {'above' if r >= 0 else 'below'} its average of the last two months — {'recent momentum is positive' if r >= 0 else 'it has been drifting down recently'}.",
+        "Whether the price is above or below its average of the last two months — a quick check on recent direction."),
+    "Price vs 200-day MA": _pw(
+        lambda r, m: f"The price is {abs(r):,.1f}% {'above' if r >= 0 else 'below'} its average of the last ten months — the long-run direction {'still points up' if r >= 0 else 'currently points down'}.",
+        "Whether the price is above or below its average of the last ten months — the classic long-run direction check."),
+    "RSI (14-day)": _pw(
+        lambda r, m: f"A 0–100 'speedometer' of recent buying vs selling — currently {r:,.0f}. Around 50 is calm; above 70 suggests overheated buying, below 30 heavy selling.",
+        "A 0–100 'speedometer' of recent buying vs selling. Around 50 is calm; above 70 suggests overheated buying, below 30 heavy selling."),
+    # --- ETF metrics ---
+    "Expense Ratio": _pw(
+        lambda r, m: f"The fund keeps {r:,.2f}% of your money every single year as its fee. The lower this is, the more of the growth stays yours.",
+        "The yearly fee the fund quietly takes from your money — the single most reliable predictor of long-run results: lower wins."),
+    "Assets Under Management": _pw(
+        lambda r, m: f"The fund looks after {fmt(r, 'compact')} in total. Big funds are cheaper to trade and far less likely to be shut down.",
+        "How much money the fund looks after in total — very small funds risk being closed, forcing you out at a bad time."),
+    "Average Daily Volume": _pw(
+        lambda r, m: f"About {fmt(r, 'compact')} units change hands each day — busier trading generally means you get a fairer price when buying or selling.",
+        "How busily the fund trades each day — busier means fairer prices when you buy or sell."),
+    "1-Year Return": _pw(
+        lambda r, m: f"100 invested a year ago would be roughly {100 * (1 + r / 100):,.0f} today.",
+        "What 100 invested a year ago would be worth today."),
+    "3-Year Average Annual Return": _pw(
+        lambda r, m: f"Over the last three years it has grown about {r:,.1f}% per year on average — a fairer test than any single year.",
+        "How much it grew per year, averaged over the last three years — a fairer test than any single year."),
+    "Sharpe Ratio (1y)": _pw(
+        lambda r, m: f"How well you were paid for the bumps: above 1 means the return justified the ride; here it's {r:,.2f}.",
+        "How well the return paid you for the bumpiness endured — above 1 means the ride was worth it."),
+    "Top Sector Concentration": _pw(
+        lambda r, m: f"About {r:,.0f}% of the fund sits in its single biggest industry — {'a well-spread basket' if r <= 30 else 'quite a lot of eggs in one basket' if r <= 45 else 'most of the eggs are in one basket'}.",
+        "How much of the fund depends on one single industry — the more it does, the more it behaves like a bet on that industry."),
+    "Top-10 Holdings Weight": _pw(
+        lambda r, m: f"The 10 biggest investments make up about {r:,.0f}% of the entire fund — the rest is spread across everything else it holds.",
+        "How much of the fund rides on just its 10 biggest investments."),
+    "Distribution Yield": _pw(
+        lambda r, m: f"The fund pays out about {r:,.1f}% of its price per year as income to you.",
+        "The income the fund pays out each year. Some funds reinvest instead of paying out — near zero can be by design."),
+}
+
+
+def plain_words(mt):
+    fn = PLAIN_WORDS.get(mt["name"])
+    return fn(mt) if fn else None
+
+
+CAT_SUBTITLES = {
+    "Valuation": "Are you paying a fair price?",
+    "Growth": "Is the business getting bigger?",
+    "Profitability": "Does it make good money?",
+    "Financial Health": "Can it pay its bills?",
+    "Risk": "How bumpy is the ride?",
+    "Technical Trend": "Which way is the price heading?",
+    "Cost": "How much of your money the fund keeps as fees",
+    "Liquidity": "How easy it is to buy and sell",
+    "Performance": "How well has it done?",
+    "Holdings Quality": "How spread out are its investments?",
+}
+
+STOCK_PLAIN = {
+    "Valuation": ("the price looks reasonable for what you get",
+                  "the price is on the fuller side",
+                  "you're paying a premium price for it"),
+    "Growth": ("the business is growing at a healthy clip",
+               "the business is growing, but only modestly",
+               "the business is barely growing"),
+    "Profitability": ("it makes good money on what it sells",
+                      "its profits are decent but not standout",
+                      "it struggles to turn sales into real profit"),
+    "Financial Health": ("it carries little debt and can comfortably pay its bills",
+                         "its debt load looks manageable",
+                         "it carries a heavy debt load"),
+    "Risk": ("the share price has been relatively calm",
+             "the share price has been moderately bumpy",
+             "the share price has been a rough ride"),
+    "Technical Trend": ("the price has been heading upward lately",
+                        "the price has been moving sideways lately",
+                        "the price has been drifting down lately"),
+}
+
+ETF_PLAIN = {
+    "Cost": ("it's cheap to own",
+             "its yearly fee is about average",
+             "its yearly fee is high and quietly eats into returns"),
+    "Liquidity": ("it's big and easy to trade",
+                  "it's reasonably easy to trade",
+                  "it's small and thinly traded"),
+    "Performance": ("returns have been strong",
+                    "returns have been okay",
+                    "returns have been weak"),
+    "Risk": ("the ride has been fairly smooth",
+             "the ride has been moderately bumpy",
+             "the ride has been very bumpy"),
+    "Holdings Quality": ("its investments are nicely spread out",
+                         "its investments are somewhat concentrated",
+                         "a lot of it rides on just a few bets"),
+}
+
+
+def _join(ps):
+    return ps[0] if len(ps) == 1 else ", ".join(ps[:-1]) + " and " + ps[-1]
+
+
+def plain_verdict(cat_scores, is_etf):
+    """2–3 template sentences saying in everyday words what the lights show.
+    Never says anything the category scores don't already say."""
+    table = ETF_PLAIN if is_etf else STOCK_PLAIN
+    good, mid, bad = [], [], []
+    for c, s in cat_scores.items():
+        if c not in table:
+            continue
+        g, m, b = table[c]
+        (good if s >= 70 else mid if s >= 50 else bad).append(g if s >= 70 else m if s >= 50 else b)
+    bits = []
+    if good:
+        bits.append("On the plus side, " + _join(good) + ".")
+    if bad:
+        bits.append(("The main concern is that " if len(bad) == 1 else "The main concerns: ") + _join(bad) + ".")
+    if mid:
+        bits.append("In between: " + _join(mid) + ".")
+    return " ".join(bits) if bits else None
+
+
 def light_for(score):
     """Map a metric score to a RAYG traffic light. Legend shown on the dashboard."""
     if score is None:
@@ -1176,6 +1451,11 @@ def render_metric_detail(mt):
     """Full explainable card for one metric — used in the dashboard pop-ups
     and the metric deep-dive tab."""
     st.markdown(status_html(mt["status"]), unsafe_allow_html=True)
+    plain = plain_words(mt)
+    if plain:
+        st.markdown(f"<div style='background:#f0fdf4;border:1px solid #bbf7d0;border-radius:10px;"
+                    f"padding:10px 12px;margin:6px 0 10px 0;'>💬 <b>In plain words</b> — {plain}</div>",
+                    unsafe_allow_html=True)
     st.markdown(f"**What it means** — {mt['definition']}")
     st.markdown(f"**Why it matters** — {mt['why']}")
     st.markdown(f"**How it is calculated** — {mt['calculation']}")
@@ -1283,7 +1563,22 @@ if st.session_state.report_symbol:
                       confidence, risk, cat_scores, adjust_bands)
             st.session_state.pending_log = False
 
+        with st.expander("🧭 First time here? How to read this report in 30 seconds"):
+            st.markdown(
+                "1. **The top box** tells you what this company or fund actually is, its latest price (in brackets), "
+                "and an overall score out of 100.\n"
+                "2. **Long-term vs mid-term** — two quick verdicts: one for 'buy and hold 5+ years', one for "
+                "'hold around 3 years', each with a confidence level.\n"
+                "3. **🚦 Scorecard tab** shows every measure as a traffic light: 🟢 great · 🟡 good · 🟠 so-so · "
+                "🔴 weak · ⚪ no data. **Click any measure** for a plain-words explanation — no finance background needed.\n"
+                "4. **👍 For / ⚠️ Watch-outs** sums up the strongest points for and against in everyday language.\n"
+                "5. This is an educational screen, **not** financial advice — it helps you ask better questions, "
+                "not skip them.")
+
         # --- Header card ---
+        hw = HORIZON_WEIGHTS["etf" if is_etf else "stock"]
+        lt = horizon_view(metrics, cat_scores, hw["long"])
+        md = horizon_view(metrics, cat_scores, hw["mid"])
         with st.container(border=True):
             h1, h2 = st.columns([3, 2])
             with h1:
@@ -1291,30 +1586,56 @@ if st.session_state.report_symbol:
                     status_html("ETF" if is_etf else "Stock") + status_html(exchange) +
                     status_html(region) + (status_html(currency) if currency else ""),
                     unsafe_allow_html=True)
-                st.markdown(f"## {name}")
+                price_tag = (f"&nbsp;<span style='font-size:1.15rem;color:#334155;font-weight:600;"
+                             f"white-space:nowrap;'>({currency} {price:,.2f})</span>" if price else "")
+                st.markdown(f"<h2 style='margin:0.3rem 0 0.2rem 0;'>{name}{price_tag}</h2>",
+                            unsafe_allow_html=True)
                 st.markdown(f"**{symbol}** · {sector}")
-                summary_bits = []
-                if overall is not None:
-                    summary_bits.append(f"This {'fund' if is_etf else 'company'} scores **{overall}/100** on the weighted framework "
-                                        f"({', '.join(f'{c} {w:.0%}' for c, w in weights.items())}).")
-                summary_bits.append(f"Data coverage confidence is **{confidence}%** — unscored metrics are excluded rather than guessed.")
-                summary_bits.append(f"Quantitative risk reads as **{risk}**.")
-                st.markdown(" ".join(summary_bits))
-                st.caption(f"Last refreshed: {refreshed}")
+                desc = business_summary(info)
+                if desc:
+                    st.markdown(f"<span style='color:#334155;'>{desc}</span>", unsafe_allow_html=True)
+                else:
+                    st.caption("No business description available from the free data source.")
+                st.caption(f"Quantitative risk: **{risk}** · data coverage: **{confidence}%** "
+                           f"(unscored metrics are excluded rather than guessed) · last refreshed: {refreshed}")
             with h2:
-                k1, k2 = st.columns(2)
-                k1.metric("Overall view", rating)
-                k2.metric("Score", f"{overall}/100" if overall is not None else "—")
-                k3, k4 = st.columns(2)
-                k3.metric("Confidence", f"{confidence}%")
-                k4.metric("Latest price", f"{currency} {price:,.2f}" if price else "—")
+                with st.container(border=True):
+                    ov_txt = f"{overall}/100" if overall is not None else "—"
+                    st.markdown(
+                        f"<div style='font-size:0.75rem;color:#64748b;text-transform:uppercase;'>Overall score</div>"
+                        f"<div style='font-size:1.7rem;font-weight:700;line-height:1.2;'>{ov_txt} "
+                        f"<span style='font-size:1rem;font-weight:600;color:#475569;'>· {rating}</span></div>",
+                        unsafe_allow_html=True)
+                with st.container(border=True):
+                    for title, (hs, hemoji, hlabel, hconf) in (("Long-term (5y+)", lt), ("Mid-term (~3y)", md)):
+                        tail = f" — **{hs}/100** · confidence {hconf}%" if hs is not None else ""
+                        st.markdown(f"{hemoji} **{title}:** {hlabel}{tail}")
+                    with st.popover("ⓘ How the horizon views are calculated"):
+                        st.markdown(
+                            "Each horizon re-weights the same category scores from this report to match what "
+                            "matters over that holding period — same data, different emphasis, no hidden model.\n\n"
+                            f"**Long-term (5y+):** {fmt_weights(hw['long'])}. Quality, balance-sheet strength and "
+                            "durable growth dominate, because they decide whether the business compounds; "
+                            "today's price chart matters little over five years.\n\n"
+                            f"**Mid-term (~3y):** {fmt_weights(hw['mid'])}. Entry valuation and trend carry more "
+                            "weight, because over three years there is less time for quality to compound past a "
+                            "poor entry price.\n\n"
+                            "**Confidence** = the share of that horizon's weighted inputs actually covered by "
+                            "data for this instrument.")
+                    st.caption("Rule-based screen derived from the scores in this report — an educational aid, "
+                               "**not** personal investment advice.")
 
         # --- Tabs (dashboard first) ---
         tab_dash, tab_m, tab_c, tab_p, tab_bb, tab_h, tab_s = st.tabs(
             ["🚦 Scorecard", "🧠 Metric deep-dive", "📊 Charts", "👥 Peer comparison",
-             "🐂 Bull / 🐻 Bear", "⭐ Watchlist & history", "🗄️ Sources & notes"])
+             "👍 For / ⚠️ Watch-outs", "⭐ Watchlist & history", "🗄️ Sources & notes"])
 
         with tab_dash:
+            verdict_txt = plain_verdict(cat_scores, is_etf)
+            if verdict_txt:
+                st.markdown(f"<div style='background:#f0f9ff;border:1px solid #bae6fd;border-radius:12px;"
+                            f"padding:12px 14px;margin-bottom:8px;font-size:1.02rem;'>💬 <b>In plain words</b> — "
+                            f"{verdict_txt}</div>", unsafe_allow_html=True)
             counts = {"🟢": 0, "🟡": 0, "🟠": 0, "🔴": 0, "⚪": 0}
             for x in metrics:
                 counts[light_for(x["score"])] += 1
@@ -1330,6 +1651,7 @@ if st.session_state.report_symbol:
                         sc = cat_scores.get(cat)
                         st.markdown(f"##### {cat} — {sc}/100" if sc is not None
                                     else f"##### {cat} — no data")
+                        st.caption(CAT_SUBTITLES.get(cat, ""))
                         st.progress((sc or 0) / 100,
                                     text=f"Weight in overall score: {weights[cat]:.0%}")
                         for mt in [x for x in metrics if x["category"] == cat]:
@@ -1352,6 +1674,7 @@ if st.session_state.report_symbol:
                 if not cat_metrics:
                     continue
                 st.markdown(f"##### {cat}")
+                st.caption(CAT_SUBTITLES.get(cat, ""))
                 for mt in cat_metrics:
                     header = f"{light_for(mt['score'])} {mt['name']}  —  {mt['value']}  ·  {mt['status']}" + \
                              (f"  ·  score {mt['score']}/100" if mt["score"] is not None else "")
@@ -1455,15 +1778,15 @@ if st.session_state.report_symbol:
         with tab_bb:
             b1, b2 = st.columns(2)
             with b1:
-                st.success("#### 🐂 Bull case")
+                st.success("#### 👍 What's going for it")
                 for p in bull_pts:
                     st.markdown(f"- {p}")
             with b2:
-                st.warning("#### 🐻 Bear case")
+                st.warning("#### ⚠️ What to watch out for")
                 for p in bear_pts:
                     st.markdown(f"- {p}")
-            st.caption("Bull/bear points are generated transparently from the highest- and lowest-scoring metrics above — "
-                       "no hidden judgement is applied.")
+            st.caption("These points are generated from the highest- and lowest-scoring measures in this "
+                       "report — nothing hidden, no opinions added.")
 
         with tab_h:
             render_history(current_symbol=symbol)
