@@ -1,6 +1,6 @@
-# Alpha Research AI — Free Deployment Guide
+# Drishti — Free Deployment Guide
 
-An explainable stock & ETF research app (India · Asia · UK · US) built with
+Drishti (दृष्टि, "clear sight"): a stock & ETF research app that explains every insight without financial jargon (India · Asia · UK · US) built with
 Streamlit + yfinance. **Total running cost: £0.** No credit card required
 anywhere in this guide.
 

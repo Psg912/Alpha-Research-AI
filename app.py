@@ -1,5 +1,5 @@
 """
-Alpha Research AI — Explainable Stock & ETF Research App
+Drishti — Insights without financial jargon
 =========================================================
 A free, self-hostable research app for stocks and ETFs across India, Asia,
 the UK and the US. Built with Streamlit + yfinance (both free).
@@ -36,8 +36,8 @@ import yfinance as yf
 # ---------------------------------------------------------------------------
 
 st.set_page_config(
-    page_title="Alpha Research AI — Explainable Stock & ETF Research",
-    page_icon="📊",
+    page_title="Drishti — Insights without financial jargon",
+    page_icon="👁️",
     layout="wide",
 )
 
@@ -1103,8 +1103,8 @@ if "report_symbol" not in st.session_state:
 
 col_logo, col_badge = st.columns([3, 1])
 with col_logo:
-    st.title("📊 Alpha Research AI")
-    st.caption("Explainable stock & ETF research — India · Asia · UK · US · free data · print-ready reports")
+    st.title("👁️ Drishti — Insights without financial jargon")
+    st.caption("Stock & ETF research — India · Asia · UK · US · free data · print-ready reports")
 with col_badge:
     st.markdown('<div style="text-align:right;padding-top:1.4rem;"><span class="ara-badge">Free data</span><span class="ara-badge">PDF ready</span></div>', unsafe_allow_html=True)
 
