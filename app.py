@@ -1159,6 +1159,57 @@ with st.container(border=True):
 # UI — report
 # ---------------------------------------------------------------------------
 
+def light_for(score):
+    """Map a metric score to a RAYG traffic light. Legend shown on the dashboard."""
+    if score is None:
+        return "⚪"
+    if score >= 80:
+        return "🟢"
+    if score >= 62:
+        return "🟡"
+    if score >= 45:
+        return "🟠"
+    return "🔴"
+
+
+def render_metric_detail(mt):
+    """Full explainable card for one metric — used in the dashboard pop-ups
+    and the metric deep-dive tab."""
+    st.markdown(status_html(mt["status"]), unsafe_allow_html=True)
+    st.markdown(f"**What it means** — {mt['definition']}")
+    st.markdown(f"**Why it matters** — {mt['why']}")
+    st.markdown(f"**How it is calculated** — {mt['calculation']}")
+    st.markdown("**What good looks like (benchmark bands)**")
+    raw_v, th_v = mt.get("raw"), mt.get("thresholds")
+    if raw_v is not None and th_v:
+        active = band_of(raw_v, th_v, mt.get("higher", True))
+    else:  # non-monotonic metrics (e.g. RSI): match on status label
+        stat = str(mt["status"]).lower()
+        active = next((i for i, (lb, _) in enumerate(mt["bands"])
+                       if stat != "n/a" and (stat in lb.lower() or lb.lower().startswith(stat))), None)
+    bcols = st.columns(len(mt["bands"]))
+    for i, (bc, (label, rng)) in enumerate(zip(bcols, mt["bands"])):
+        if i == active:
+            style = "background:#eff6ff;border:2px solid #1d4ed8;"
+            marker = (f"<div style='margin-top:5px;font-size:0.72rem;color:#1d4ed8;"
+                      f"font-weight:700;'>◉ {mt['value']} — you are here</div>")
+        else:
+            style, marker = "background:#f8fafc;border:1px solid #e2e8f0;", ""
+        bc.markdown(f"<div style='{style}border-radius:10px;padding:8px 10px;'>"
+                    f"<div style='font-size:0.7rem;color:#64748b;text-transform:uppercase;'>{label}</div>"
+                    f"<div style='font-size:0.85rem;font-weight:600;'>{rng}</div>{marker}</div>",
+                    unsafe_allow_html=True)
+    pos = position_summary(mt)
+    if pos:
+        st.markdown(f"📍 **Where the current value sits** — {pos}")
+    st.markdown(f"**Sector / category context** — {mt['benchmark']}")
+    st.markdown(f"**Interpretation of the current value** — {mt['interpretation']}")
+    st.markdown(f"**Impact on the score** — {mt['impact']}")
+    if mt.get("adjusted"):
+        st.caption(f"ℹ️ Benchmark bands above are adjusted to **{mt['adjusted']}** sector norms. "
+                   "Use the toggle at the top of the report to switch back to market-wide bands.")
+
+
 def status_html(status):
     s = str(status).lower()
     cls = ("ara-status-excellent" if "excellent" in s or "positive" in s or "low" in s.split()
@@ -1258,44 +1309,39 @@ if st.session_state.report_symbol:
                 k3.metric("Confidence", f"{confidence}%")
                 k4.metric("Latest price", f"{currency} {price:,.2f}" if price else "—")
 
-        # --- Scorecard + price chart ---
-        sc1, sc2 = st.columns([1, 2])
-        with sc1:
-            with st.container(border=True):
-                st.markdown("#### 🛡️ Scorecard")
-                for cat, sc in cat_scores.items():
-                    st.markdown(f"**{cat}** — {sc}/100 &nbsp;<span style='color:#64748b;font-size:0.8rem;'>(weight {weights[cat]:.0%})</span>",
-                                unsafe_allow_html=True)
-                    st.progress(sc / 100)
-                missing = [c for c in weights if c not in cat_scores]
-                if missing:
-                    st.caption("Not scored (no data): " + ", ".join(missing) + ". Weights re-normalised across scored categories.")
-                st.caption("Every score below is traceable to a stated benchmark band — open any metric card for the rule.")
-        with sc2:
-            with st.container(border=True):
-                st.markdown("#### 📈 Price trend (1 year)")
-                if hist is not None:
-                    fig = go.Figure()
-                    fig.add_trace(go.Scatter(x=hist.index, y=hist["Close"], mode="lines",
-                                             name="Close", line=dict(color="#2563eb", width=2),
-                                             fill="tozeroy", fillcolor="rgba(37,99,235,0.08)"))
-                    if len(hist) >= 50:
-                        fig.add_trace(go.Scatter(x=hist.index, y=hist["Close"].rolling(50).mean(),
-                                                 name="50-day MA", line=dict(color="#f97316", width=1.4, dash="dot")))
-                    if len(hist) >= 200:
-                        fig.add_trace(go.Scatter(x=hist.index, y=hist["Close"].rolling(200).mean(),
-                                                 name="200-day MA", line=dict(color="#16a34a", width=1.4, dash="dash")))
-                    fig.update_layout(height=330, margin=dict(l=10, r=10, t=10, b=10),
-                                      legend=dict(orientation="h", y=1.08),
-                                      yaxis_title=currency, xaxis_title=None)
-                    st.plotly_chart(fig, use_container_width=True)
-                else:
-                    st.info("Price history unavailable from the free source for this instrument.")
-
-        # --- Tabs ---
-        tab_m, tab_c, tab_p, tab_bb, tab_h, tab_s = st.tabs(
-            ["🧠 Explainable metrics", "📊 Charts", "👥 Peer comparison",
+        # --- Tabs (dashboard first) ---
+        tab_dash, tab_m, tab_c, tab_p, tab_bb, tab_h, tab_s = st.tabs(
+            ["🚦 Scorecard", "🧠 Metric deep-dive", "📊 Charts", "👥 Peer comparison",
              "🐂 Bull / 🐻 Bear", "⭐ Watchlist & history", "🗄️ Sources & notes"])
+
+        with tab_dash:
+            counts = {"🟢": 0, "🟡": 0, "🟠": 0, "🔴": 0, "⚪": 0}
+            for x in metrics:
+                counts[light_for(x["score"])] += 1
+            st.markdown(
+                f"**At a glance:** {' · '.join(f'{k} {v}' for k, v in counts.items() if v)}"
+                f" &nbsp;&nbsp;|&nbsp;&nbsp; **Legend:** 🟢 Excellent · 🟡 Good · 🟠 Acceptable · "
+                f"🔴 Weak · ⚪ No data &nbsp;—&nbsp; click any metric for its full explanation.")
+            dash_cats = [c for c in weights if any(x["category"] == c for x in metrics)]
+            dcols = st.columns(3)
+            for i, cat in enumerate(dash_cats):
+                with dcols[i % 3]:
+                    with st.container(border=True):
+                        sc = cat_scores.get(cat)
+                        st.markdown(f"##### {cat} — {sc}/100" if sc is not None
+                                    else f"##### {cat} — no data")
+                        st.progress((sc or 0) / 100,
+                                    text=f"Weight in overall score: {weights[cat]:.0%}")
+                        for mt in [x for x in metrics if x["category"] == cat]:
+                            with st.popover(f"{light_for(mt['score'])} {mt['name']}  ·  {mt['value']}",
+                                            use_container_width=True):
+                                st.markdown(f"#### {mt['name']} — {mt['value']}")
+                                render_metric_detail(mt)
+            missing = [c for c in weights if c not in cat_scores]
+            if missing:
+                st.caption("Not scored (no data): " + ", ".join(missing) +
+                           ". Weights are re-normalised across the scored categories.")
+            st.caption("Every light is traceable to a stated benchmark band — nothing is a black box.")
 
         with tab_m:
             st.markdown("**Explainable metric interpretation guide** — every metric states what it means, why it matters, "
@@ -1307,42 +1353,10 @@ if st.session_state.report_symbol:
                     continue
                 st.markdown(f"##### {cat}")
                 for mt in cat_metrics:
-                    header = f"{mt['name']}  —  {mt['value']}  ·  {mt['status']}" + \
+                    header = f"{light_for(mt['score'])} {mt['name']}  —  {mt['value']}  ·  {mt['status']}" + \
                              (f"  ·  score {mt['score']}/100" if mt["score"] is not None else "")
                     with st.expander(header):
-                        st.markdown(status_html(mt["status"]), unsafe_allow_html=True)
-                        st.markdown(f"**What it means** — {mt['definition']}")
-                        st.markdown(f"**Why it matters** — {mt['why']}")
-                        st.markdown(f"**How it is calculated** — {mt['calculation']}")
-                        st.markdown("**What good looks like (benchmark bands)**")
-                        raw_v, th_v = mt.get("raw"), mt.get("thresholds")
-                        if raw_v is not None and th_v:
-                            active = band_of(raw_v, th_v, mt.get("higher", True))
-                        else:  # non-monotonic metrics (e.g. RSI): match on status label
-                            stat = str(mt["status"]).lower()
-                            active = next((i for i, (lb, _) in enumerate(mt["bands"])
-                                           if stat != "n/a" and (stat in lb.lower() or lb.lower().startswith(stat))), None)
-                        bcols = st.columns(len(mt["bands"]))
-                        for i, (bc, (label, rng)) in enumerate(zip(bcols, mt["bands"])):
-                            if i == active:
-                                style = "background:#eff6ff;border:2px solid #1d4ed8;"
-                                marker = (f"<div style='margin-top:5px;font-size:0.72rem;color:#1d4ed8;"
-                                          f"font-weight:700;'>◉ {mt['value']} — you are here</div>")
-                            else:
-                                style, marker = "background:#f8fafc;border:1px solid #e2e8f0;", ""
-                            bc.markdown(f"<div style='{style}border-radius:10px;padding:8px 10px;'>"
-                                        f"<div style='font-size:0.7rem;color:#64748b;text-transform:uppercase;'>{label}</div>"
-                                        f"<div style='font-size:0.85rem;font-weight:600;'>{rng}</div>{marker}</div>",
-                                        unsafe_allow_html=True)
-                        pos = position_summary(mt)
-                        if pos:
-                            st.markdown(f"📍 **Where the current value sits** — {pos}")
-                        st.markdown(f"**Sector / category context** — {mt['benchmark']}")
-                        st.markdown(f"**Interpretation of the current value** — {mt['interpretation']}")
-                        st.markdown(f"**Impact on the score** — {mt['impact']}")
-                        if mt.get("adjusted"):
-                            st.caption(f"ℹ️ Benchmark bands above are adjusted to **{mt['adjusted']}** sector norms. "
-                                       "Use the toggle at the top of the report to switch back to market-wide bands.")
+                        render_metric_detail(mt)
 
         with tab_p:
             st.markdown(f"**Peer comparison** — nearest peers to **{symbol}** per Yahoo Finance's free "
@@ -1388,6 +1402,25 @@ if st.session_state.report_symbol:
                            "sanity-check that the peers really are comparable before drawing conclusions.")
 
         with tab_c:
+            with st.container(border=True):
+                st.markdown("#### 📈 Price trend (1 year)")
+                if hist is not None:
+                    fig = go.Figure()
+                    fig.add_trace(go.Scatter(x=hist.index, y=hist["Close"], mode="lines",
+                                             name="Close", line=dict(color="#2563eb", width=2),
+                                             fill="tozeroy", fillcolor="rgba(37,99,235,0.08)"))
+                    if len(hist) >= 50:
+                        fig.add_trace(go.Scatter(x=hist.index, y=hist["Close"].rolling(50).mean(),
+                                                 name="50-day MA", line=dict(color="#f97316", width=1.4, dash="dot")))
+                    if len(hist) >= 200:
+                        fig.add_trace(go.Scatter(x=hist.index, y=hist["Close"].rolling(200).mean(),
+                                                 name="200-day MA", line=dict(color="#16a34a", width=1.4, dash="dash")))
+                    fig.update_layout(height=330, margin=dict(l=10, r=10, t=10, b=10),
+                                      legend=dict(orientation="h", y=1.08),
+                                      yaxis_title=currency, xaxis_title=None)
+                    st.plotly_chart(fig, use_container_width=True)
+                else:
+                    st.info("Price history unavailable from the free source for this instrument.")
             cc1, cc2 = st.columns(2)
             with cc1:
                 st.markdown("#### Score breakdown")
